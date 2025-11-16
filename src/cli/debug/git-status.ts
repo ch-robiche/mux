@@ -11,8 +11,8 @@ import { join } from "path";
 import { execSync } from "child_process";
 
 // Import production code - script and parser stay in sync
-import { GIT_STATUS_SCRIPT, parseGitStatusScriptOutput } from "@/node/utils/git/gitStatus";
-import { parseGitShowBranchForStatus } from "@/node/utils/git/parseGitStatus";
+import { GIT_STATUS_SCRIPT, parseGitStatusScriptOutput } from "@/common/utils/git/gitStatus";
+import { parseGitShowBranchForStatus } from "@/common/utils/git/parseGitStatus";
 import { getMuxSrcDir } from "@/common/constants/paths";
 
 function findWorkspaces(): Array<{ id: string; path: string }> {

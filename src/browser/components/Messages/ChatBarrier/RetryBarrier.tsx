@@ -9,7 +9,7 @@ import {
   isEligibleForAutoRetry,
   isNonRetryableSendError,
 } from "@/browser/utils/messages/retryEligibility";
-import { formatSendMessageError } from "@/node/utils/errors/formatSendError";
+import { formatSendMessageError } from "@/common/utils/errors/formatSendError";
 import { createManualRetryState, calculateBackoffDelay } from "@/browser/utils/messages/retryState";
 
 interface RetryBarrierProps {

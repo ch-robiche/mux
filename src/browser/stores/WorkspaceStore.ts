@@ -23,7 +23,10 @@ import { sumUsageHistory } from "@/common/utils/tokens/usageAggregator";
 import type { TokenConsumer } from "@/common/types/chatStats";
 import type { LanguageModelV2Usage } from "@ai-sdk/provider";
 import { getCancelledCompactionKey } from "@/common/constants/storage";
-import { isCompactingStream, findCompactionRequestMessage } from "@/node/utils/compaction/handler";
+import {
+  isCompactingStream,
+  findCompactionRequestMessage,
+} from "@/common/utils/compaction/handler";
 import { createFreshRetryState } from "@/browser/utils/messages/retryState";
 
 export interface WorkspaceState {

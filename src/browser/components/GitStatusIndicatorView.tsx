@@ -1,7 +1,7 @@
 import React from "react";
 import { createPortal } from "react-dom";
 import type { GitStatus } from "@/common/types/workspace";
-import type { GitCommit, GitBranchHeader } from "@/node/utils/git/parseGitLog";
+import type { GitCommit, GitBranchHeader } from "@/common/utils/git/parseGitLog";
 import { cn } from "@/common/lib/utils";
 
 // Helper for indicator colors

@@ -3,7 +3,7 @@ import * as path from "path";
 import { defaultConfig } from "@/node/config";
 import type { MuxMessage } from "@/common/types/message";
 import { calculateTokenStats } from "@/common/utils/tokens/tokenStatsCalculator";
-import { getDefaultModelFromLRU } from "@/browser/hooks/useModelLRU";
+import { getDefaultModel } from "@/common/utils/model/defaults";
 
 /**
  * Debug command to display cost/token statistics for a workspace
@@ -35,7 +35,7 @@ export async function costsCommand(workspaceId: string) {
 
   // Detect model from first assistant message
   const firstAssistantMessage = messages.find((msg) => msg.role === "assistant");
-  const model = firstAssistantMessage?.metadata?.model ?? getDefaultModelFromLRU();
+  const model = firstAssistantMessage?.metadata?.model ?? getDefaultModel();
 
   // Calculate stats using shared logic (now synchronous)
   const stats = await calculateTokenStats(messages, model);

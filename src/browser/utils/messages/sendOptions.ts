@@ -4,7 +4,7 @@ import {
   getModeKey,
   USE_1M_CONTEXT_KEY,
 } from "@/common/constants/storage";
-import { modeToToolPolicy, PLAN_MODE_INSTRUCTION } from "@/browser/utils/ui/modeUtils";
+import { modeToToolPolicy, PLAN_MODE_INSTRUCTION } from "@/common/utils/ui/modeUtils";
 import { readPersistedState } from "@/browser/hooks/usePersistedState";
 import type { SendMessageOptions } from "@/common/types/ipc";
 import type { UIMode } from "@/common/types/mode";

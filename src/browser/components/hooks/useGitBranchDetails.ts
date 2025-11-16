@@ -5,7 +5,7 @@ import {
   parseGitShowBranch,
   type GitCommit,
   type GitBranchHeader,
-} from "@/node/utils/git/parseGitLog";
+} from "@/common/utils/git/parseGitLog";
 
 const GitBranchDataSchema = z.object({
   showBranch: z.string(),

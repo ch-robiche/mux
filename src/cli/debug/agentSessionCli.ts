@@ -24,9 +24,9 @@ import {
   type SendMessageOptions,
   type WorkspaceChatMessage,
 } from "@/common/types/ipc";
-import { getDefaultModelFromLRU } from "@/browser/hooks/useModelLRU";
+import { getDefaultModel } from "@/common/utils/model/defaults";
 import { ensureProvidersConfig } from "@/common/utils/providers/ensureProvidersConfig";
-import { modeToToolPolicy, PLAN_MODE_INSTRUCTION } from "@/browser/utils/ui/modeUtils";
+import { modeToToolPolicy, PLAN_MODE_INSTRUCTION } from "@/common/utils/ui/modeUtils";
 import {
   extractAssistantText,
   extractReasoning,
@@ -184,7 +184,7 @@ async function main(): Promise<void> {
   }
 
   const model =
-    values.model && values.model.trim().length > 0 ? values.model.trim() : getDefaultModelFromLRU();
+    values.model && values.model.trim().length > 0 ? values.model.trim() : getDefaultModel();
   const timeoutMs = parseTimeout(values.timeout);
   const thinkingLevel = parseThinkingLevel(values["thinking-level"]);
   const initialMode = parseMode(values.mode);

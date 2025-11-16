@@ -3,7 +3,7 @@ import { cn } from "@/common/lib/utils";
 import { VERSION } from "@/version";
 import { TooltipWrapper, Tooltip } from "./Tooltip";
 import type { UpdateStatus } from "@/common/types/ipc";
-import { isTelemetryEnabled } from "@/node/telemetry";
+import { isTelemetryEnabled } from "@/common/telemetry";
 
 // Update check intervals
 const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours

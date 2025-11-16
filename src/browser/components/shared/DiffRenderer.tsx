@@ -6,7 +6,7 @@
 
 import React, { useEffect, useState } from "react";
 import { cn } from "@/common/lib/utils";
-import { getLanguageFromPath } from "@/node/utils/git/languageDetector";
+import { getLanguageFromPath } from "@/common/utils/git/languageDetector";
 import { Tooltip, TooltipWrapper } from "../Tooltip";
 import { groupDiffLines } from "@/browser/utils/highlighting/diffChunking";
 import {

@@ -3,7 +3,7 @@ import { useThinkingLevel } from "./useThinkingLevel";
 import { useMode } from "@/browser/contexts/ModeContext";
 import { usePersistedState } from "./usePersistedState";
 import { useModelLRU } from "./useModelLRU";
-import { modeToToolPolicy, PLAN_MODE_INSTRUCTION } from "@/browser/utils/ui/modeUtils";
+import { modeToToolPolicy, PLAN_MODE_INSTRUCTION } from "@/common/utils/ui/modeUtils";
 import { getModelKey } from "@/common/constants/storage";
 import type { SendMessageOptions } from "@/common/types/ipc";
 import type { UIMode } from "@/common/types/mode";

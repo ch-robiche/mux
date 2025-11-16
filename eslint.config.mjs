@@ -106,6 +106,93 @@ const localPlugin = {
         };
       },
     },
+    "no-cross-boundary-imports": {
+      meta: {
+        type: "problem",
+        docs: {
+          description: "Enforce folder boundaries to prevent architectural violations",
+        },
+        messages: {
+          browserToNode:
+            "browser/ cannot import from node/. Move shared code to common/ or use IPC.",
+          nodeToDesktop:
+            "node/ cannot import from desktop/. Move shared code to common/ or use dependency injection.",
+          nodeToCli:
+            "node/ cannot import from cli/. Move shared code to common/.",
+          cliToBrowser:
+            "cli/ cannot import from browser/. Move shared code to common/.",
+          desktopToBrowser:
+            "desktop/ cannot import from browser/. Move shared code to common/.",
+        },
+      },
+      create(context) {
+        return {
+          ImportDeclaration(node) {
+            // Allow type-only imports (for DI patterns)
+            if (node.importKind === "type") {
+              return;
+            }
+
+            const sourceFile = context.filename;
+            const importPath = node.source.value;
+
+            // Extract folder from source file (browser, node, desktop, cli, common)
+            const sourceFolderMatch = sourceFile.match(/\/src\/(browser|node|desktop|cli|common)\//);
+            if (!sourceFolderMatch) return;
+            const sourceFolder = sourceFolderMatch[1];
+
+            // Extract folder from import target
+            // Handle relative imports (e.g., '../node/...')
+            let targetFolder = null;
+            if (importPath.startsWith("../")) {
+              const targetMatch = importPath.match(/\.\.\/(browser|node|desktop|cli|common)\//);
+              if (targetMatch) {
+                targetFolder = targetMatch[1];
+              }
+            } else if (importPath.startsWith("@/")) {
+              // Handle alias imports (e.g., '@/node/...')
+              const targetMatch = importPath.match(/@\/(browser|node|desktop|cli|common)\//);
+              if (targetMatch) {
+                targetFolder = targetMatch[1];
+              }
+            }
+
+            if (!targetFolder) return;
+
+            // Allow imports from common
+            if (targetFolder === "common") return;
+
+            // Check for violations
+            if (sourceFolder === "browser" && targetFolder === "node") {
+              context.report({
+                node,
+                messageId: "browserToNode",
+              });
+            } else if (sourceFolder === "node" && targetFolder === "desktop") {
+              context.report({
+                node,
+                messageId: "nodeToDesktop",
+              });
+            } else if (sourceFolder === "node" && targetFolder === "cli") {
+              context.report({
+                node,
+                messageId: "nodeToCli",
+              });
+            } else if (sourceFolder === "cli" && targetFolder === "browser") {
+              context.report({
+                node,
+                messageId: "cliToBrowser",
+              });
+            } else if (sourceFolder === "desktop" && targetFolder === "browser") {
+              context.report({
+                node,
+                messageId: "desktopToBrowser",
+              });
+            }
+          },
+        };
+      },
+    },
   },
 };
 
@@ -265,6 +352,7 @@ export default defineConfig([
       // Safe Node.js patterns
       "local/no-unsafe-child-process": "error",
       "local/no-sync-fs-methods": "error",
+      "local/no-cross-boundary-imports": "error",
 
       // Allow console for this app (it's a dev tool)
       "no-console": "off",
@@ -410,6 +498,8 @@ export default defineConfig([
       // This file is only used by Node.js code (cli/debug) but lives in common/
       // TODO: Consider moving to node/utils/
       "src/common/utils/providers/ensureProvidersConfig.ts",
+      // Telemetry uses defensive process checks for test environments
+      "src/common/telemetry/**",
     ],
     rules: {
       "no-restricted-globals": [
