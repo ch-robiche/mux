@@ -121,7 +121,7 @@ export default defineConfig([
       "!eslint.config.mjs",
       "vite.config.ts",
       "electron.vite.config.ts",
-      "src/main.tsx",
+      "src/browser/main.tsx",
     ],
   },
   js.configs.recommended,
@@ -349,18 +349,18 @@ export default defineConfig([
     // Temporarily allow sync fs methods in files with existing usage
     // TODO: Gradually migrate these to async operations
     files: [
-      "src/config.ts",
-      "src/debug/**/*.ts",
-      "src/git.ts",
-      "src/main-desktop.ts",
-      "src/config.test.ts",
-      "src/services/gitService.ts",
-      "src/services/log.ts",
-      "src/services/streamManager.ts",
-      "src/services/tempDir.ts",
-      "src/services/tools/bash.ts",
-      "src/services/tools/bash.test.ts",
-      "src/services/tools/testHelpers.ts",
+      "src/node/config.ts",
+      "src/cli/debug/**/*.ts",
+      "src/node/git.ts",
+      "src/desktop/main.ts",
+      "src/node/config.test.ts",
+      "src/node/services/gitService.ts",
+      "src/node/services/log.ts",
+      "src/node/services/streamManager.ts",
+      "src/node/services/tempDir.ts",
+      "src/node/services/tools/bash.ts",
+      "src/node/services/tools/bash.test.ts",
+      "src/node/services/tools/testHelpers.ts",
     ],
     rules: {
       "local/no-sync-fs-methods": "off",
@@ -368,11 +368,11 @@ export default defineConfig([
   },
   {
     // Frontend architectural boundary - prevent services and tokenizer imports
-    // Note: src/utils/** and src/stores/** are not included because:
+    // Note: src/browser/utils/** and src/browser/stores/** are not included because:
     // - Some utils are shared between main/renderer (e.g., utils/tools registry)
     // - Stores can import from utils/messages which is renderer-safe
-    // - Type-only imports from services are safe (types live in src/types/)
-    files: ["src/components/**", "src/contexts/**", "src/hooks/**", "src/App.tsx"],
+    // - Type-only imports from services are safe (types live in src/common/types/)
+    files: ["src/browser/components/**", "src/browser/contexts/**", "src/browser/hooks/**", "src/browser/App.tsx"],
     rules: {
       "no-restricted-imports": [
         "error",
@@ -402,18 +402,14 @@ export default defineConfig([
     // Renderer process (frontend) architectural boundary - prevent Node.js API usage
     files: ["src/**/*.ts", "src/**/*.tsx"],
     ignores: [
-      "src/main*.ts",
-      "src/preload.ts",
-      "src/services/**",
-      "src/runtime/**",
-      "src/utils/main/**",
-      "src/utils/providers/**",
-      "src/telemetry/**",
-      "src/git.ts",
-      "src/config.ts",
-      "src/debug/**",
+      "src/cli/**",
+      "src/desktop/**",
+      "src/node/**",
       "**/*.test.ts",
       "**/*.test.tsx",
+      // This file is only used by Node.js code (cli/debug) but lives in common/
+      // TODO: Consider moving to node/utils/
+      "src/common/utils/providers/ensureProvidersConfig.ts",
     ],
     rules: {
       "no-restricted-globals": [
