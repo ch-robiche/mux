@@ -7,6 +7,8 @@
 import type { AnthropicProviderOptions } from "@ai-sdk/anthropic";
 import type { OpenAIResponsesProviderOptions } from "@ai-sdk/openai";
 import type { GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
+import type { XaiProviderOptions } from "@ai-sdk/xai";
+import type { MuxProviderOptions } from "@/common/types/providerOptions";
 import type { ThinkingLevel } from "@/common/types/thinking";
 import {
   ANTHROPIC_THINKING_BUDGETS,
@@ -38,6 +40,7 @@ type ProviderOptions =
   | { openai: OpenAIResponsesProviderOptions }
   | { google: GoogleGenerativeAIProviderOptions }
   | { openrouter: OpenRouterReasoningOptions }
+  | { xai: XaiProviderOptions }
   | Record<string, never>; // Empty object for unsupported providers
 
 /**
@@ -59,7 +62,8 @@ export function buildProviderOptions(
   modelString: string,
   thinkingLevel: ThinkingLevel,
   messages?: MuxMessage[],
-  lostResponseIds?: (id: string) => boolean
+  lostResponseIds?: (id: string) => boolean,
+  muxProviderOptions?: MuxProviderOptions
 ): ProviderOptions {
   // Always clamp to the model's supported thinking policy (e.g., gpt-5-pro = HIGH only)
   const effectiveThinking = enforceThinkingPolicy(modelString, thinkingLevel);
@@ -248,6 +252,25 @@ export function buildProviderOptions(
     // No reasoning config needed when thinking is off
     log.debug("buildProviderOptions: OpenRouter (thinking off, no provider options)");
     return {};
+  }
+
+  // Build xAI-specific options
+  if (provider === "xai") {
+    const overrides = muxProviderOptions?.xai ?? {};
+
+    const defaultSearchParameters: XaiProviderOptions["searchParameters"] = {
+      mode: "auto",
+      returnCitations: true,
+    };
+
+    const options: ProviderOptions = {
+      xai: {
+        ...overrides,
+        searchParameters: overrides.searchParameters ?? defaultSearchParameters,
+      },
+    };
+    log.debug("buildProviderOptions: Returning xAI options", options);
+    return options;
   }
 
   // No provider-specific options for unsupported providers
