@@ -46,14 +46,29 @@ export async function generateWorkspaceName(
 }
 
 /**
+ * Sanitize a string to be git-safe: lowercase, hyphens only, no leading/trailing hyphens.
+ */
+function sanitizeBranchName(name: string, maxLength: number): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-+/g, "-")
+    .substring(0, maxLength);
+}
+
+/**
  * Validate and sanitize branch name to be git-safe
  */
 function validateBranchName(name: string): string {
-  // Ensure git-safe
-  const cleaned = name.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-  // Remove leading/trailing hyphens and collapse multiple hyphens
-  return cleaned
-    .replace(/^-+|-+$/g, "")
-    .replace(/-+/g, "-")
-    .substring(0, 50);
+  return sanitizeBranchName(name, 50);
+}
+
+/**
+ * Generate a placeholder name from the user's message for immediate display
+ * while the AI generates the real title. This is git-safe and human-readable.
+ */
+export function generatePlaceholderName(message: string): string {
+  const truncated = message.slice(0, 40).trim();
+  return sanitizeBranchName(truncated, 30) || "new-workspace";
 }
