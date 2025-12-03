@@ -27,6 +27,9 @@ function launchDesktop(): void {
 }
 
 // Route known subcommands to their dedicated entry points (each has its own Commander instance)
+// When Electron launches us (e.g., `bunx electron --flags .`), argv[2] may be a flag or "." - not a subcommand
+const isElectronLaunchArg = subcommand?.startsWith("-") || subcommand === ".";
+
 if (subcommand === "run") {
   process.argv.splice(2, 1); // Remove "run" since run.ts defines .name("mux run")
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -39,8 +42,8 @@ if (subcommand === "run") {
   process.argv.splice(2, 1);
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   require("./api");
-} else if (subcommand === "desktop" || (subcommand === undefined && isElectron)) {
-  // Explicit `mux desktop` or no args when running under Electron
+} else if (subcommand === "desktop" || (isElectron && (subcommand === undefined || isElectronLaunchArg))) {
+  // Explicit `mux desktop`, or Electron runtime with no subcommand / Electron launch args
   launchDesktop();
 } else {
   // No subcommand (non-Electron), flags (--help, --version), or unknown commands

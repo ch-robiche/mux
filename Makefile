@@ -158,7 +158,7 @@ endif
 
 
 start: node_modules/.installed build-main build-preload build-static ## Build and start Electron app
-	@NODE_ENV=development bun x electron --remote-debugging-port=9222 .
+	@NODE_ENV=development bunx electron --remote-debugging-port=9222 .
 
 ## Build targets (can run in parallel)
 build: node_modules/.installed src/version.ts build-renderer build-main build-preload build-icons build-static ## Build all targets
