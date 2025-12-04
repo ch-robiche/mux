@@ -742,6 +742,14 @@ export const router = (authToken?: string) => {
           );
         }),
     },
+    telemetry: {
+      track: t
+        .input(schemas.telemetry.track.input)
+        .output(schemas.telemetry.track.output)
+        .handler(({ context, input }) => {
+          context.telemetryService.capture(input);
+        }),
+    },
   });
 };
 
