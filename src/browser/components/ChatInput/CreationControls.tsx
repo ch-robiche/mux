@@ -1,4 +1,4 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useEffect } from "react";
 import { RUNTIME_MODE, type RuntimeMode } from "@/common/types/runtime";
 import { Select } from "../Select";
 import { RuntimeIconSelector } from "../RuntimeIconSelector";
@@ -9,6 +9,8 @@ import type { WorkspaceNameState } from "@/browser/hooks/useWorkspaceName";
 
 interface CreationControlsProps {
   branches: string[];
+  /** Whether branches have finished loading (to distinguish loading vs non-git repo) */
+  branchesLoaded: boolean;
   trunkBranch: string;
   onTrunkBranchChange: (branch: string) => void;
   runtimeMode: RuntimeMode;
@@ -25,15 +27,26 @@ interface CreationControlsProps {
 /**
  * Additional controls shown only during workspace creation
  * - Trunk branch selector (which branch to fork from) - hidden for Local runtime
- * - Runtime mode (Local, Worktree, SSH)
+ * - Runtime mode (Local, Worktree, SSH) - only Local available for non-git directories
  * - Workspace name (auto-generated with manual override)
  */
 export function CreationControls(props: CreationControlsProps) {
+  // Non-git directories (empty branches after loading completes) can only use local runtime
+  // Don't check until branches have loaded to avoid prematurely switching runtime
+  const isNonGitRepo = props.branchesLoaded && props.branches.length === 0;
+
   // Local runtime doesn't need a trunk branch selector (uses project dir as-is)
   const showTrunkBranchSelector =
     props.branches.length > 0 && props.runtimeMode !== RUNTIME_MODE.LOCAL;
 
-  const { nameState } = props;
+  const { runtimeMode, onRuntimeModeChange, nameState } = props;
+
+  // Force local runtime for non-git directories (only after branches loaded)
+  useEffect(() => {
+    if (isNonGitRepo && runtimeMode !== RUNTIME_MODE.LOCAL) {
+      onRuntimeModeChange(RUNTIME_MODE.LOCAL);
+    }
+  }, [isNonGitRepo, runtimeMode, onRuntimeModeChange]);
 
   const handleNameChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -121,6 +134,7 @@ export function CreationControls(props: CreationControlsProps) {
           defaultMode={props.defaultRuntimeMode}
           onSetDefault={props.onSetDefaultRuntime}
           disabled={props.disabled}
+          disabledModes={isNonGitRepo ? [RUNTIME_MODE.WORKTREE, RUNTIME_MODE.SSH] : undefined}
         />
 
         {/* Trunk Branch Selector - hidden for Local runtime */}
