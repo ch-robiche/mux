@@ -91,6 +91,8 @@ interface AgentSessionOptions {
   backgroundProcessManager: BackgroundProcessManager;
   /** Called after compaction completes to trigger metadata refresh */
   onCompactionComplete?: () => void;
+  /** Called when post-compaction context state may have changed (plan/file edits) */
+  onPostCompactionStateChange?: () => void;
 }
 
 export class AgentSession {
@@ -102,6 +104,7 @@ export class AgentSession {
   private readonly initStateManager: InitStateManager;
   private readonly backgroundProcessManager: BackgroundProcessManager;
   private readonly onCompactionComplete?: () => void;
+  private readonly onPostCompactionStateChange?: () => void;
   private readonly emitter = new EventEmitter();
   private readonly aiListeners: Array<{ event: string; handler: (...args: unknown[]) => void }> =
     [];
@@ -128,6 +131,11 @@ export class AgentSession {
    * Used to enable the cooldown-based attachment injection.
    */
   private compactionOccurred = false;
+  /**
+   * Cache the last-known experiment state so we don't spam metadata refresh
+   * when post-compaction context is disabled.
+   */
+  private postCompactionContextEnabled = false;
 
   constructor(options: AgentSessionOptions) {
     assert(options, "AgentSession requires options");
@@ -140,6 +148,7 @@ export class AgentSession {
       initStateManager,
       backgroundProcessManager,
       onCompactionComplete,
+      onPostCompactionStateChange,
     } = options;
 
     assert(typeof workspaceId === "string", "workspaceId must be a string");
@@ -154,6 +163,7 @@ export class AgentSession {
     this.initStateManager = initStateManager;
     this.backgroundProcessManager = backgroundProcessManager;
     this.onCompactionComplete = onCompactionComplete;
+    this.onPostCompactionStateChange = onPostCompactionStateChange;
 
     this.compactionHandler = new CompactionHandler({
       workspaceId: this.workspaceId,
@@ -546,6 +556,10 @@ export class AgentSession {
     }
 
     const historyResult = await this.historyService.getHistory(this.workspaceId);
+    // Cache whether post-compaction context is enabled for this session.
+    // Used to decide whether tool-call-end should trigger metadata refresh.
+    this.postCompactionContextEnabled = Boolean(options?.experiments?.postCompactionContext);
+
     if (!historyResult.success) {
       return Err(createUnknownSendMessageError(historyResult.error));
     }
@@ -611,6 +625,18 @@ export class AgentSession {
     forward("tool-call-delta", (payload) => this.emitChatEvent(payload));
     forward("tool-call-end", (payload) => {
       this.emitChatEvent(payload);
+
+      // If post-compaction context is enabled, certain tools can change what should
+      // be displayed/injected (plan writes, tracked file diffs). Trigger a metadata
+      // refresh so the right sidebar updates without requiring an experiment toggle.
+      if (
+        this.postCompactionContextEnabled &&
+        payload.type === "tool-call-end" &&
+        (payload.toolName === "propose_plan" || payload.toolName.startsWith("file_edit_"))
+      ) {
+        this.onPostCompactionStateChange?.();
+      }
+
       // Tool call completed: auto-send queued messages
       this.sendQueuedMessages();
     });
