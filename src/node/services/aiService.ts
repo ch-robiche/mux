@@ -941,6 +941,8 @@ export class AIService extends EventEmitter {
       // This is idempotent - won't double-commit if already in chat.jsonl
       await this.partialService.commitToHistory(workspaceId);
 
+      const uiMode: UIMode | undefined =
+        mode === "plan" ? "plan" : mode === "exec" ? "exec" : undefined;
       const effectiveMuxProviderOptions: MuxProviderOptions = muxProviderOptions ?? {};
 
       // For xAI models, swap between reasoning and non-reasoning variants based on thinkingLevel
@@ -982,6 +984,7 @@ export class AIService extends EventEmitter {
           runtime: earlyRuntime,
           runtimeTempDir: os.tmpdir(),
           secrets: {},
+          mode: uiMode,
         },
         "", // Empty workspace ID for early stub config
         this.initStateManager,
@@ -1170,11 +1173,13 @@ export class AIService extends EventEmitter {
       const runtimeTempDir = await this.streamManager.createTempDirForStream(streamToken, runtime);
 
       // Extract tool-specific instructions from AGENTS.md files
+      // Pass uiMode so ask_user_question is included in plan mode
       const toolInstructions = await readToolInstructions(
         metadata,
         runtime,
         workspacePath,
-        modelString
+        modelString,
+        uiMode === "plan" ? "plan" : "exec"
       );
 
       // Get model-specific tools with workspace path (correct for local or remote)
@@ -1198,7 +1203,7 @@ export class AIService extends EventEmitter {
           // Plan/exec mode configuration for plan file access.
           // - read: plan file is readable in all modes (useful context)
           // - write: enforced by file_edit_* tools (plan file is read-only outside plan mode)
-          mode: mode as UIMode | undefined,
+          mode: uiMode,
           planFilePath,
           workspaceId,
           // External edit detection callback
