@@ -13,6 +13,8 @@ import type { PartialService } from "@/node/services/partialService";
 import type { AIService } from "@/node/services/aiService";
 import type { InitStateManager } from "@/node/services/initStateManager";
 import type { ExtensionMetadataService } from "@/node/services/ExtensionMetadataService";
+import type { ExperimentsService } from "@/node/services/experimentsService";
+import { EXPERIMENT_IDS, EXPERIMENTS } from "@/common/constants/experiments";
 import type { MCPServerManager } from "@/node/services/mcpServerManager";
 import { createRuntime, IncompatibleRuntimeError } from "@/node/runtime/runtimeFactory";
 import { validateWorkspaceName } from "@/common/utils/validation/workspaceValidation";
@@ -118,6 +120,7 @@ export class WorkspaceService extends EventEmitter {
     this.setupMetadataListeners();
   }
 
+  private experimentsService?: ExperimentsService;
   private mcpServerManager?: MCPServerManager;
   // Optional terminal service for cleanup on workspace removal
   private terminalService?: TerminalService;
@@ -128,6 +131,10 @@ export class WorkspaceService extends EventEmitter {
    */
   setMCPServerManager(manager: MCPServerManager): void {
     this.mcpServerManager = manager;
+  }
+
+  setExperimentsService(experimentsService: ExperimentsService): void {
+    this.experimentsService = experimentsService;
   }
 
   /**
@@ -680,7 +687,27 @@ export class WorkspaceService extends EventEmitter {
     try {
       const metadata = await this.config.getAllWorkspaceMetadata();
 
-      if (!options?.includePostCompaction) {
+      // For list(), treat includePostCompaction as an explicit frontend override when provided.
+      // If it's undefined (e.g., user hasn't overridden), fall back to PostHog assignment.
+      const postCompactionExperiment = EXPERIMENTS[EXPERIMENT_IDS.POST_COMPACTION_CONTEXT];
+      let includePostCompaction: boolean;
+      if (
+        postCompactionExperiment.userOverridable &&
+        options?.includePostCompaction !== undefined
+      ) {
+        // User-overridable: trust frontend value
+        includePostCompaction = options.includePostCompaction;
+      } else if (this.experimentsService?.isRemoteEvaluationEnabled() === true) {
+        // Remote evaluation: use PostHog assignment
+        includePostCompaction = this.experimentsService.isExperimentEnabled(
+          EXPERIMENT_IDS.POST_COMPACTION_CONTEXT
+        );
+      } else {
+        // Fallback to frontend value or false
+        includePostCompaction = options?.includePostCompaction === true;
+      }
+
+      if (!includePostCompaction) {
         return metadata;
       }
 
@@ -995,7 +1022,39 @@ export class WorkspaceService extends EventEmitter {
         void this.updateRecencyTimestamp(workspaceId, messageTimestamp);
       }
 
-      if (this.aiService.isStreaming(workspaceId) && !options?.editMessageId) {
+      // Experiments: resolve flags respecting userOverridable setting.
+      // - If userOverridable && frontend provides a value (explicit override) → use frontend value
+      // - Else if remote evaluation enabled → use PostHog assignment
+      // - Else → use frontend value (dev fallback) or default
+      const postCompactionExperiment = EXPERIMENTS[EXPERIMENT_IDS.POST_COMPACTION_CONTEXT];
+      const frontendValue = options?.experiments?.postCompactionContext;
+
+      let postCompactionContextEnabled: boolean | undefined;
+      if (postCompactionExperiment.userOverridable && frontendValue !== undefined) {
+        // User-overridable: trust frontend value (user's explicit choice)
+        postCompactionContextEnabled = frontendValue;
+      } else if (this.experimentsService?.isRemoteEvaluationEnabled() === true) {
+        // Remote evaluation: use PostHog assignment
+        postCompactionContextEnabled = this.experimentsService.isExperimentEnabled(
+          EXPERIMENT_IDS.POST_COMPACTION_CONTEXT
+        );
+      } else {
+        // Fallback to frontend value (dev mode or telemetry disabled)
+        postCompactionContextEnabled = frontendValue;
+      }
+
+      const resolvedOptions =
+        postCompactionContextEnabled === undefined
+          ? options
+          : {
+              ...(options ?? { model: defaultModel }),
+              experiments: {
+                ...(options?.experiments ?? {}),
+                postCompactionContext: postCompactionContextEnabled,
+              },
+            };
+
+      if (this.aiService.isStreaming(workspaceId) && !resolvedOptions?.editMessageId) {
         const pendingAskUserQuestion = askUserQuestionManager.getLatestPending(workspaceId);
         if (pendingAskUserQuestion) {
           try {
@@ -1013,11 +1072,11 @@ export class WorkspaceService extends EventEmitter {
           }
         }
 
-        session.queueMessage(message, options);
+        session.queueMessage(message, resolvedOptions);
         return Ok(undefined);
       }
 
-      const result = await session.sendMessage(message, options);
+      const result = await session.sendMessage(message, resolvedOptions);
       if (!result.success) {
         log.error("sendMessage handler: session returned error", {
           workspaceId,

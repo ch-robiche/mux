@@ -1,5 +1,5 @@
-import React, { useCallback } from "react";
-import { useExperiment } from "@/browser/contexts/ExperimentsContext";
+import React, { useCallback, useMemo } from "react";
+import { useExperiment, useRemoteExperimentValue } from "@/browser/contexts/ExperimentsContext";
 import {
   getExperimentList,
   EXPERIMENT_IDS,
@@ -7,6 +7,7 @@ import {
 } from "@/common/constants/experiments";
 import { Switch } from "@/browser/components/ui/switch";
 import { useWorkspaceContext } from "@/browser/contexts/WorkspaceContext";
+import { useTelemetry } from "@/browser/hooks/useTelemetry";
 
 interface ExperimentRowProps {
   experimentId: ExperimentId;
@@ -17,14 +18,18 @@ interface ExperimentRowProps {
 
 function ExperimentRow(props: ExperimentRowProps) {
   const [enabled, setEnabled] = useExperiment(props.experimentId);
-  const { onToggle } = props;
+  const remote = useRemoteExperimentValue(props.experimentId);
+  const telemetry = useTelemetry();
+  const { onToggle, experimentId } = props;
 
   const handleToggle = useCallback(
     (value: boolean) => {
       setEnabled(value);
+      // Track the override for analytics
+      telemetry.experimentOverridden(experimentId, remote?.value ?? null, value);
       onToggle?.(value);
     },
-    [setEnabled, onToggle]
+    [setEnabled, telemetry, experimentId, remote?.value, onToggle]
   );
 
   return (
@@ -43,8 +48,15 @@ function ExperimentRow(props: ExperimentRowProps) {
 }
 
 export function ExperimentsSection() {
-  const experiments = getExperimentList();
+  const allExperiments = getExperimentList();
   const { refreshWorkspaceMetadata } = useWorkspaceContext();
+
+  // Only show user-overridable experiments (non-overridable ones are hidden since users can't change them)
+  const experiments = useMemo(
+    () =>
+      allExperiments.filter((exp) => exp.showInSettings !== false && exp.userOverridable === true),
+    [allExperiments]
+  );
 
   // When post-compaction experiment is toggled, refresh metadata to fetch/clear bundled state
   const handlePostCompactionToggle = useCallback(() => {
