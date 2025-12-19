@@ -57,6 +57,13 @@ import type {
   StreamStartEvent,
 } from "@/common/types/stream";
 import { applyToolPolicy, type ToolPolicy } from "@/common/utils/tools/toolPolicy";
+// PTC types only - modules lazy-loaded to avoid loading typescript/prettier at startup
+import type {
+  PTCEventWithParent,
+  createCodeExecutionTool as CreateCodeExecutionToolFn,
+} from "@/node/services/tools/code_execution";
+import type { QuickJSRuntimeFactory } from "@/node/services/ptc/quickjsRuntime";
+import type { ToolBridge } from "@/node/services/ptc/toolBridge";
 import { MockScenarioPlayer } from "./mock/mockScenarioPlayer";
 import { EnvHttpProxyAgent, type Dispatcher } from "undici";
 import { getPlanFilePath } from "@/common/utils/planStorage";
@@ -109,6 +116,40 @@ type FetchWithBunExtensions = typeof fetch & {
 
 const globalFetchWithExtras = fetch as FetchWithBunExtensions;
 const defaultFetchWithExtras = defaultFetchWithUnlimitedTimeout as FetchWithBunExtensions;
+
+// Lazy-loaded PTC modules (only loaded when experiment is enabled)
+// This avoids loading typescript/prettier at startup which causes issues:
+// - Integration tests fail without --experimental-vm-modules (prettier uses dynamic imports)
+// - Smoke tests fail if typescript isn't in production bundle
+// Dynamic imports are justified: PTC pulls in ~10MB of dependencies that would slow startup.
+interface PTCModules {
+  createCodeExecutionTool: typeof CreateCodeExecutionToolFn;
+  QuickJSRuntimeFactory: typeof QuickJSRuntimeFactory;
+  ToolBridge: typeof ToolBridge;
+  runtimeFactory: QuickJSRuntimeFactory | null;
+}
+let ptcModules: PTCModules | null = null;
+
+async function getPTCModules(): Promise<PTCModules> {
+  if (ptcModules) return ptcModules;
+
+  /* eslint-disable no-restricted-syntax -- Dynamic imports required here to avoid loading
+     ~10MB of typescript/prettier/quickjs at startup (causes CI failures) */
+  const [codeExecution, quickjs, toolBridge] = await Promise.all([
+    import("@/node/services/tools/code_execution"),
+    import("@/node/services/ptc/quickjsRuntime"),
+    import("@/node/services/ptc/toolBridge"),
+  ]);
+  /* eslint-enable no-restricted-syntax */
+
+  ptcModules = {
+    createCodeExecutionTool: codeExecution.createCodeExecutionTool,
+    QuickJSRuntimeFactory: quickjs.QuickJSRuntimeFactory,
+    ToolBridge: toolBridge.ToolBridge,
+    runtimeFactory: null,
+  };
+  return ptcModules;
+}
 
 if (typeof globalFetchWithExtras.preconnect === "function") {
   defaultFetchWithExtras.preconnect = globalFetchWithExtras.preconnect.bind(globalFetchWithExtras);
@@ -930,7 +971,8 @@ export class AIService extends EventEmitter {
     mode?: string,
     recordFileState?: (filePath: string, state: FileState) => void,
     changedFileAttachments?: EditedFileAttachment[],
-    postCompactionAttachments?: PostCompactionAttachment[] | null
+    postCompactionAttachments?: PostCompactionAttachment[] | null,
+    experiments?: { programmaticToolCalling?: boolean; programmaticToolCallingExclusive?: boolean }
   ): Promise<Result<void, SendMessageError>> {
     try {
       if (this.mockModeEnabled && this.mockScenarioPlayer) {
@@ -1237,8 +1279,54 @@ export class AIService extends EventEmitter {
         mcpTools
       );
 
-      // Apply tool policy to filter tools (if policy provided)
-      const tools = applyToolPolicy(allTools, toolPolicy);
+      // Apply tool policy FIRST - this must happen before PTC to ensure sandbox
+      // respects allow/deny filters. The policy-filtered tools are passed to
+      // ToolBridge so the mux.* API only exposes policy-allowed tools.
+      const policyFilteredTools = applyToolPolicy(allTools, toolPolicy);
+
+      // Handle PTC experiments - add or replace tools with code_execution
+      let tools = policyFilteredTools;
+      if (experiments?.programmaticToolCalling || experiments?.programmaticToolCallingExclusive) {
+        try {
+          // Lazy-load PTC modules only when experiments are enabled
+          const ptc = await getPTCModules();
+
+          // Create emit callback that forwards nested events to stream
+          // Only forward tool-call-start/end events, not console events
+          const emitNestedEvent = (event: PTCEventWithParent): void => {
+            if (event.type === "tool-call-start" || event.type === "tool-call-end") {
+              this.streamManager.emitNestedToolEvent(workspaceId, assistantMessageId, event);
+            }
+            // Console events are not streamed (appear in final result only)
+          };
+
+          // ToolBridge uses policy-filtered tools - sandbox only exposes allowed tools
+          const toolBridge = new ptc.ToolBridge(policyFilteredTools);
+
+          // Singleton runtime factory (WASM module is expensive to load)
+          ptc.runtimeFactory ??= new ptc.QuickJSRuntimeFactory();
+
+          const codeExecutionTool = await ptc.createCodeExecutionTool(
+            ptc.runtimeFactory,
+            toolBridge,
+            emitNestedEvent
+          );
+
+          if (experiments?.programmaticToolCallingExclusive) {
+            // Exclusive mode: code_execution + non-bridgeable tools (web_search, propose_plan, etc.)
+            // Non-bridgeable tools can't be used from within code_execution, so they're still
+            // available directly to the model (subject to policy)
+            const nonBridgeable = toolBridge.getNonBridgeableTools();
+            tools = { ...nonBridgeable, code_execution: codeExecutionTool };
+          } else {
+            // Supplement mode: add code_execution alongside policy-filtered tools
+            tools = { ...policyFilteredTools, code_execution: codeExecutionTool };
+          }
+        } catch (error) {
+          // Fall back to policy-filtered tools if PTC creation fails
+          log.error("Failed to create code_execution tool, falling back to base tools", { error });
+        }
+      }
 
       const effectiveMcpStats: MCPWorkspaceStats =
         mcpStats ??
