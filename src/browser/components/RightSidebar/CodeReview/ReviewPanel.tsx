@@ -27,10 +27,11 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { HunkViewer } from "./HunkViewer";
 import { ReviewControls } from "./ReviewControls";
 import { FileTree } from "./FileTree";
+import { shellQuote } from "@/common/utils/shell";
 import { usePersistedState } from "@/browser/hooks/usePersistedState";
 import { useReviewState } from "@/browser/hooks/useReviewState";
 import { useHunkFirstSeen } from "@/browser/hooks/useHunkFirstSeen";
-import { useReviewRefreshController } from "@/browser/hooks/useReviewRefreshController";
+import { RefreshController, type LastRefreshInfo } from "@/browser/utils/RefreshController";
 import { parseDiff, extractAllHunks, buildGitDiffCommand } from "@/common/utils/git/diffParser";
 import { getReviewSearchStateKey, REVIEW_SORT_ORDER_KEY } from "@/common/constants/storage";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/browser/components/ui/tooltip";
@@ -96,6 +97,31 @@ type DiffState =
 const REVIEW_PANEL_CACHE_MAX_ENTRIES = 20;
 const REVIEW_PANEL_CACHE_MAX_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
 
+/**
+ * Preserve object references for unchanged hunks to prevent re-renders.
+ * Compares by ID and content - if a hunk exists in prev with same content, reuse it.
+ */
+function preserveHunkReferences(prev: DiffHunk[], next: DiffHunk[]): DiffHunk[] {
+  if (prev.length === 0) return next;
+
+  const prevById = new Map(prev.map((h) => [h.id, h]));
+  let allSame = prev.length === next.length;
+
+  const result = next.map((hunk, i) => {
+    const prevHunk = prevById.get(hunk.id);
+    // Fast path: same ID and content means unchanged (content hash is part of ID)
+    if (prevHunk && prevHunk.content === hunk.content) {
+      if (allSame && prev[i]?.id !== hunk.id) allSame = false;
+      return prevHunk;
+    }
+    allSame = false;
+    return hunk;
+  });
+
+  // If all hunks are reused in same order, return prev array to preserve top-level reference
+  return allSame ? prev : result;
+}
+
 interface ReviewPanelDiffCacheValue {
   hunks: DiffHunk[];
   truncationWarning: string | null;
@@ -120,6 +146,51 @@ const reviewPanelCache = new LRUCache<string, ReviewPanelCacheValue>({
   sizeCalculation: (value) => estimateJsonSizeBytes(value),
 });
 
+function getOriginBranchForFetch(diffBase: string): string | null {
+  const trimmed = diffBase.trim();
+  if (!trimmed.startsWith("origin/")) return null;
+
+  const branch = trimmed.slice("origin/".length);
+  if (branch.length === 0) return null;
+
+  return branch;
+}
+
+interface OriginFetchState {
+  key: string;
+  promise: Promise<void>;
+}
+
+async function ensureOriginFetched(params: {
+  api: APIClient;
+  workspaceId: string;
+  diffBase: string;
+  refreshToken: number;
+  originFetchRef: React.MutableRefObject<OriginFetchState | null>;
+}): Promise<void> {
+  const originBranch = getOriginBranchForFetch(params.diffBase);
+  if (!originBranch) return;
+
+  const key = [params.workspaceId, params.diffBase, String(params.refreshToken)].join("\u0000");
+  const existing = params.originFetchRef.current;
+  if (existing?.key === key) {
+    await existing.promise;
+    return;
+  }
+
+  // Ensure manual refresh doesn't hang on credential prompts.
+  const promise = params.api.workspace
+    .executeBash({
+      workspaceId: params.workspaceId,
+      script: `GIT_TERMINAL_PROMPT=0 git fetch origin ${shellQuote(originBranch)} --quiet || true`,
+      options: { timeout_secs: 30 },
+    })
+    .then(() => undefined)
+    .catch(() => undefined);
+
+  params.originFetchRef.current = { key, promise };
+  await promise;
+}
 function makeReviewPanelCacheKey(params: {
   workspaceId: string;
   workspacePath: string;
@@ -163,6 +234,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
   isCreating = false,
   onStatsChange,
 }) => {
+  const originFetchRef = useRef<OriginFetchState | null>(null);
   const { api } = useAPI();
   const panelRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -247,25 +319,62 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
     sortOrder: sortOrder,
   });
 
-  // Centralized refresh controller - handles debouncing, visibility, interaction pausing
-  const refreshController = useReviewRefreshController({
-    workspaceId,
-    api,
-    isCreating,
-    diffBase: filters.diffBase,
-    onRefresh: () => setRefreshTrigger((prev) => prev + 1),
-    scrollContainerRef,
-    onGitStatusRefresh: () => invalidateGitStatus(workspaceId),
-  });
+  // Ref to track when user is interacting (pauses auto-refresh)
+  const isInteractingRef = useRef(false);
+
+  // Track last fetch time for detecting tool completions while unmounted
+  const lastFetchTimeRef = useRef(0);
+
+  // Last refresh info for UI display (tooltip showing trigger reason + time)
+  const [lastRefreshInfo, setLastRefreshInfo] = useState<LastRefreshInfo | null>(null);
+
+  // RefreshController - handles debouncing, in-flight guards, etc.
+  // Created in useEffect to survive React StrictMode double-mount.
+  // (StrictMode calls cleanup then re-mounts; refs persist but controller would be disposed)
+  const controllerRef = useRef<RefreshController | null>(null);
+
+  useEffect(() => {
+    const controller = new RefreshController({
+      debounceMs: 3000,
+      isPaused: () => isInteractingRef.current,
+      onRefresh: () => {
+        lastFetchTimeRef.current = Date.now();
+        setRefreshTrigger((prev) => prev + 1);
+        invalidateGitStatus(workspaceId);
+      },
+      onRefreshComplete: setLastRefreshInfo,
+    });
+    controllerRef.current = controller;
+
+    // Subscribe to tool completions
+    const unsubscribe = workspaceStore.subscribeFileModifyingTool((wsId) => {
+      if (wsId === workspaceId) {
+        controller.schedule();
+      }
+    });
+
+    // Check for tool completions that happened while unmounted
+    const lastToolMs = workspaceStore.getFileModifyingToolMs(workspaceId);
+    if (lastToolMs && lastToolMs > lastFetchTimeRef.current) {
+      controller.requestImmediate();
+      workspaceStore.clearFileModifyingToolMs(workspaceId);
+    }
+
+    return () => {
+      unsubscribe();
+      controller.dispose();
+      controllerRef.current = null;
+    };
+  }, [workspaceId]);
 
   const handleRefresh = () => {
-    refreshController.requestManualRefresh();
+    controllerRef.current?.requestImmediate();
   };
 
   // Sync panel focus with interaction tracking (pauses auto-refresh while user is focused)
   useEffect(() => {
-    refreshController.setInteracting(isPanelFocused);
-  }, [isPanelFocused, refreshController]);
+    isInteractingRef.current = isPanelFocused;
+  }, [isPanelFocused]);
 
   // Focus panel when focusTrigger changes (preserves current hunk selection)
   useEffect(() => {
@@ -290,7 +399,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
 
     const prevRefreshTrigger = lastFileTreeRefreshTriggerRef.current;
     lastFileTreeRefreshTriggerRef.current = refreshTrigger;
-    const isManualRefresh = prevRefreshTrigger !== null && prevRefreshTrigger !== refreshTrigger;
+    const isManualRefresh = refreshTrigger !== 0 && prevRefreshTrigger !== refreshTrigger;
 
     const numstatCommand = buildGitDiffCommand(
       filters.diffBase,
@@ -321,6 +430,15 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
     const loadFileTree = async () => {
       setIsLoadingTree(true);
       try {
+        await ensureOriginFetched({
+          api,
+          workspaceId,
+          diffBase: filters.diffBase,
+          refreshToken: refreshTrigger,
+          originFetchRef,
+        });
+        if (cancelled) return;
+
         const tree = await executeWorkspaceBashAndCache({
           api,
           workspaceId,
@@ -370,7 +488,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
 
     const prevRefreshTrigger = lastDiffRefreshTriggerRef.current;
     lastDiffRefreshTriggerRef.current = refreshTrigger;
-    const isManualRefresh = prevRefreshTrigger !== null && prevRefreshTrigger !== refreshTrigger;
+    const isManualRefresh = refreshTrigger !== 0 && prevRefreshTrigger !== refreshTrigger;
 
     const pathFilter = selectedFilePath ? ` -- "${extractNewPath(selectedFilePath)}"` : "";
 
@@ -432,6 +550,15 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
 
     const loadDiff = async () => {
       try {
+        await ensureOriginFetched({
+          api,
+          workspaceId,
+          diffBase: filters.diffBase,
+          refreshToken: refreshTrigger,
+          originFetchRef,
+        });
+        if (cancelled) return;
+
         // Git-level filters (affect what data is fetched):
         // - diffBase: what to diff against
         // - includeUncommitted: include working directory changes
@@ -470,10 +597,19 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
         if (cancelled) return;
 
         setDiagnosticInfo(data.diagnosticInfo);
-        setDiffState({
-          status: "loaded",
-          hunks: data.hunks,
-          truncationWarning: data.truncationWarning,
+
+        // Preserve object references for unchanged hunks to prevent unnecessary re-renders.
+        // HunkViewer is memoized on hunk object identity, so reusing references avoids
+        // re-rendering (and re-highlighting) hunks that haven't actually changed.
+        setDiffState((prev) => {
+          const prevHunks =
+            prev.status === "loaded" || prev.status === "refreshing" ? prev.hunks : [];
+          const hunks = preserveHunkReferences(prevHunks, data.hunks);
+          return {
+            status: "loaded",
+            hunks,
+            truncationWarning: data.truncationWarning,
+          };
         });
 
         if (data.hunks.length > 0) {
@@ -810,7 +946,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (matchesKeybind(e, KEYBINDS.REFRESH_REVIEW)) {
         e.preventDefault();
-        refreshController.requestManualRefresh();
+        controllerRef.current?.requestImmediate();
       } else if (matchesKeybind(e, KEYBINDS.FOCUS_REVIEW_SEARCH)) {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -819,7 +955,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [refreshController]);
+  }, []);
 
   // Show loading state while workspace is being created
   if (isCreating) {
@@ -852,6 +988,7 @@ export const ReviewPanel: React.FC<ReviewPanelProps> = ({
         workspaceId={workspaceId}
         workspacePath={workspacePath}
         refreshTrigger={refreshTrigger}
+        lastRefreshInfo={lastRefreshInfo}
       />
 
       {diffState.status === "error" ? (
