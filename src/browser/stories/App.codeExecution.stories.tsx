@@ -90,6 +90,16 @@ export const Completed: AppStory = {
                       {
                         level: "log",
                         args: ["Read file with", 42, "lines"],
+                        timestamp: Date.now() - 100,
+                      },
+                      {
+                        level: "warn",
+                        args: ["Replacing string in config"],
+                        timestamp: Date.now() - 50,
+                      },
+                      {
+                        level: "log",
+                        args: ["Config updated successfully"],
                         timestamp: Date.now(),
                       },
                     ],
@@ -182,6 +192,7 @@ export const Executing: AppStory = {
                     input: { filePath: "src/config.ts" },
                     output: {
                       success: true,
+                      file_size: 1024,
                       lines_read: 42,
                       content: "export const config = {...};",
                     },
@@ -291,40 +302,39 @@ export const Failed: AppStory = {
   ),
 };
 
-/** Code execution returning JSON result (pretty-printed) */
-export const WithJsonResult: AppStory = {
+/** Code execution with no tool calls (pure computation) */
+export const NoToolCalls: AppStory = {
   render: () => (
     <AppWithMocks
       setup={() =>
         setupSimpleChatStory({
           messages: [
-            createUserMessage("msg-1", "Get the user data", {
+            createUserMessage("msg-1", "Calculate fibonacci", {
               historySequence: 1,
               timestamp: STABLE_TIMESTAMP - 60000,
             }),
-            createAssistantMessage("msg-2", "Fetching user data.", {
+            createAssistantMessage("msg-2", "Computing fibonacci sequence.", {
               historySequence: 2,
               timestamp: STABLE_TIMESTAMP - 50000,
               toolCalls: [
                 createCodeExecutionTool(
                   "call-1",
-                  `const users = await mux.file_read({ filePath: "data/users.json" });
-return JSON.parse(users.content);`,
+                  `function fib(n) {
+  if (n <= 1) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+const results = [];
+for (let i = 0; i < 10; i++) {
+  results.push(fib(i));
+}
+return results;`,
                   {
                     success: true,
-                    result: {
-                      users: [
-                        { id: 1, name: "Alice", email: "alice@example.com", role: "admin" },
-                        { id: 2, name: "Bob", email: "bob@example.com", role: "user" },
-                        { id: 3, name: "Charlie", email: "charlie@example.com", role: "user" },
-                      ],
-                      total: 3,
-                      page: 1,
-                      hasMore: false,
-                    },
+                    result: [0, 1, 1, 2, 3, 5, 8, 13, 21, 34],
                     toolCalls: [],
                     consoleOutput: [],
-                    duration_ms: 25,
+                    duration_ms: 12,
                   },
                   []
                 ),
@@ -337,55 +347,91 @@ return JSON.parse(users.content);`,
   ),
 };
 
-/** Code execution with lots of console output */
-export const WithConsoleOutput: AppStory = {
+/** Code execution with nested tool that threw an error (error-only output shape) */
+export const NestedToolError: AppStory = {
   render: () => (
     <AppWithMocks
       setup={() =>
         setupSimpleChatStory({
           messages: [
-            createUserMessage("msg-1", "Run the script", {
+            createUserMessage("msg-1", "Read a file that doesn't exist", {
               historySequence: 1,
               timestamp: STABLE_TIMESTAMP - 60000,
             }),
-            createAssistantMessage("msg-2", "Running the script now.", {
+            createAssistantMessage("msg-2", "I'll try to read that file.", {
               historySequence: 2,
               timestamp: STABLE_TIMESTAMP - 50000,
               toolCalls: [
                 createCodeExecutionTool(
                   "call-1",
-                  `console.log("Starting...");
-console.log("Processing items:", [1, 2, 3]);
-console.warn("This might take a while");
-console.error("Something went wrong but we recovered");
-console.log("Done!");`,
+                  `const result = mux.file_read({ filePath: "nonexistent.ts" });
+return result;`,
                   {
-                    success: true,
-                    result: undefined,
-                    toolCalls: [],
-                    consoleOutput: [
-                      { level: "log", args: ["Starting..."], timestamp: Date.now() - 100 },
+                    success: false,
+                    error: "Tool execution failed",
+                    consoleOutput: [],
+                    duration_ms: 10,
+                    toolCalls: [
                       {
-                        level: "log",
-                        args: ["Processing items:", [1, 2, 3]],
-                        timestamp: Date.now() - 80,
+                        toolName: "file_read",
+                        args: { filePath: "nonexistent.ts" },
+                        // Error-only output shape (no success field) - tool threw
+                        result: { error: "ENOENT: no such file or directory" },
+                        duration_ms: 5,
                       },
-                      {
-                        level: "warn",
-                        args: ["This might take a while"],
-                        timestamp: Date.now() - 60,
-                      },
-                      {
-                        level: "error",
-                        args: ["Something went wrong but we recovered"],
-                        timestamp: Date.now() - 40,
-                      },
-                      { level: "log", args: ["Done!"], timestamp: Date.now() },
                     ],
-                    duration_ms: 100,
-                  },
-                  []
+                  }
                 ),
+              ],
+            }),
+          ],
+        })
+      }
+    />
+  ),
+};
+
+/** Code execution that was interrupted (e.g., app restart) */
+export const Interrupted: AppStory = {
+  render: () => (
+    <AppWithMocks
+      setup={() =>
+        setupSimpleChatStory({
+          messages: [
+            createUserMessage("msg-1", "Run a long operation", {
+              historySequence: 1,
+              timestamp: STABLE_TIMESTAMP - 60000,
+            }),
+            createAssistantMessage("msg-2", "I'll run that for you.", {
+              historySequence: 2,
+              timestamp: STABLE_TIMESTAMP - 50000,
+              partial: true, // Mark as interrupted/partial message
+              toolCalls: [
+                createPendingCodeExecutionTool("call-1", SAMPLE_CODE, [
+                  {
+                    toolCallId: "nested-1",
+                    toolName: "file_read",
+                    input: { filePath: "src/config.ts" },
+                    output: {
+                      success: true,
+                      file_size: 1024,
+                      lines_read: 42,
+                      content: "export const config = {...};",
+                    },
+                    state: "output-available",
+                  },
+                  {
+                    toolCallId: "nested-2",
+                    toolName: "bash",
+                    input: {
+                      script: "sleep 60",
+                      timeout_secs: 120,
+                      run_in_background: false,
+                      display_name: "Long sleep",
+                    },
+                    state: "input-available", // Was executing when interrupted
+                  },
+                ]),
               ],
             }),
           ],
