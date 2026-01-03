@@ -37,8 +37,8 @@ declare const ContinueMessageBrand: unique symbol;
  */
 export type ContinueMessage = UserMessageContent & {
   model?: string;
-  /** Mode for the continue message (determines tool policy). Defaults to 'exec'. */
-  mode?: "exec" | "plan";
+  /** Agent ID for the continue message (determines tool policy via agent definitions). Defaults to 'exec'. */
+  agentId?: string;
   /** Brand marker - not present at runtime, enforces factory usage at compile time */
   readonly [ContinueMessageBrand]: true;
 };
@@ -52,7 +52,7 @@ export interface BuildContinueMessageOptions {
   imageParts?: ImagePart[];
   reviews?: ReviewNoteDataForDisplay[];
   model: string;
-  mode: "exec" | "plan";
+  agentId: string;
 }
 
 /**
@@ -76,7 +76,7 @@ export function buildContinueMessage(
     imageParts: opts.imageParts,
     reviews: opts.reviews,
     model: opts.model,
-    mode: opts.mode,
+    agentId: opts.agentId,
   } as ContinueMessage;
   return result;
 }
@@ -85,7 +85,12 @@ export function buildContinueMessage(
  * Persisted ContinueMessage shape - what we read from storage/history.
  * May be missing fields if saved by older code versions.
  */
-export type PersistedContinueMessage = Partial<Omit<ContinueMessage, typeof ContinueMessageBrand>>;
+export type PersistedContinueMessage =
+  // Older versions stored `mode` instead of `agentId`.
+  // Keep `mode` here so rebuildContinueMessage can migrate existing history.
+  Partial<Omit<ContinueMessage, typeof ContinueMessageBrand>> & {
+    mode?: "exec" | "plan";
+  };
 
 /**
  * Rebuild a ContinueMessage from persisted data.
@@ -98,16 +103,24 @@ export type PersistedContinueMessage = Partial<Omit<ContinueMessage, typeof Cont
  */
 export function rebuildContinueMessage(
   persisted: PersistedContinueMessage | undefined,
-  defaults: { model: string; mode: "exec" | "plan" }
+  defaults: { model: string; agentId: string }
 ): ContinueMessage | undefined {
   if (!persisted) return undefined;
+
+  const persistedAgentId =
+    typeof persisted.agentId === "string" && persisted.agentId.trim().length > 0
+      ? persisted.agentId.trim()
+      : undefined;
+
+  const legacyAgentId =
+    persisted.mode === "plan" || persisted.mode === "exec" ? persisted.mode : undefined;
 
   return buildContinueMessage({
     text: persisted.text,
     imageParts: persisted.imageParts,
     reviews: persisted.reviews,
     model: persisted.model ?? defaults.model,
-    mode: persisted.mode ?? defaults.mode,
+    agentId: persistedAgentId ?? legacyAgentId ?? defaults.agentId,
   });
 }
 
