@@ -14,6 +14,7 @@ import {
   FILE_SUGGESTION_KEYS,
 } from "../CommandSuggestions";
 import type { Toast } from "../ChatInputToast";
+import { ConnectionStatusToast } from "../ConnectionStatusToast";
 import { ChatInputToast } from "../ChatInputToast";
 import { createCommandToast, createErrorToast } from "../ChatInputToasts";
 import { parseCommand } from "@/browser/utils/slashCommands/parser";
@@ -1884,6 +1885,8 @@ const ChatInputInner: React.FC<ChatInputProps> = (props) => {
     return `Type a message... (${hints.join(", ")})`;
   })();
 
+  const activeToast = toast ?? (variant === "creation" ? creationState.toast : null);
+
   // No wrapper needed - parent controls layout for both variants
   const Wrapper = React.Fragment;
   const wrapperProps = {};
@@ -1913,16 +1916,20 @@ const ChatInputInner: React.FC<ChatInputProps> = (props) => {
         data-autofocus-state="done"
       >
         <div className={cn("w-full", variant !== "creation" && "mx-auto max-w-4xl")}>
-          {/* Toast - show shared toast (slash commands) or variant-specific toast */}
-          <ChatInputToast
-            toast={toast ?? (variant === "creation" ? creationState.toast : null)}
-            onDismiss={() => {
-              handleToastDismiss();
-              if (variant === "creation") {
-                creationState.setToast(null);
-              }
-            }}
-          />
+          {/* Toasts (overlay) */}
+          <div className="pointer-events-none absolute right-[15px] bottom-full left-[15px] z-[1000] mb-2 flex flex-col gap-2 [&>*]:pointer-events-auto">
+            <ConnectionStatusToast wrap={false} />
+            <ChatInputToast
+              toast={activeToast}
+              wrap={false}
+              onDismiss={() => {
+                handleToastDismiss();
+                if (variant === "creation") {
+                  creationState.setToast(null);
+                }
+              }}
+            />
+          </div>
 
           {/* Attached reviews preview - show styled blocks with remove/edit buttons */}
           {/* Hide during send to avoid duplicate display with the sent message */}
