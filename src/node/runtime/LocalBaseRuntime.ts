@@ -67,12 +67,18 @@ export abstract class LocalBaseRuntime implements Runtime {
     const spawnCommand = bashPath;
     const spawnArgs = ["-c", command];
 
+    const defaultPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+    const effectivePath =
+      (options.env?.PATH && options.env.PATH.length > 0 ? options.env.PATH : process.env.PATH) ??
+      defaultPath;
+
     const childProcess = spawn(spawnCommand, spawnArgs, {
       cwd,
       env: {
         ...process.env,
         ...(options.env ?? {}),
         ...NON_INTERACTIVE_ENV_VARS,
+        PATH: effectivePath,
       },
       stdio: ["pipe", "pipe", "pipe"],
       // CRITICAL: Spawn as detached process group leader to enable cleanup of background processes.
@@ -140,6 +146,11 @@ export abstract class LocalBaseRuntime implements Runtime {
     });
 
     const duration = exitCode.then(() => performance.now() - startTime);
+
+    // Avoid unhandled promise rejections in fire-and-forget exec() callsites.
+    // Callers that await these promises will still observe the rejection.
+    void exitCode.catch(() => undefined);
+    void duration.catch(() => undefined);
 
     // Register process group cleanup with DisposableProcess
     // This ensures ALL background children are killed when process exits
