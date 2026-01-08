@@ -47,6 +47,12 @@ interface DockerCommandResult {
   stderr: string;
 }
 
+/** Result of checking if a container already exists and is valid for reuse */
+type ContainerCheckResult =
+  | { action: "skip" } // Valid forked container, skip setup
+  | { action: "cleanup"; reason: string } // Exists but invalid, needs removal
+  | { action: "create" }; // Doesn't exist, proceed to create
+
 /**
  * Run a Docker CLI command and return result.
  * Unlike execAsync, this always resolves (never rejects) and returns exit code.
@@ -422,6 +428,9 @@ export class DockerRuntime extends RemoteRuntime {
     const { projectPath, branchName, trunkBranch, workspacePath, initLogger, abortSignal, env } =
       params;
 
+    // Hoisted outside try so catch block can check whether we created the container
+    let skipContainerSetup = false;
+
     try {
       if (!this.containerName) {
         return {
@@ -431,138 +440,41 @@ export class DockerRuntime extends RemoteRuntime {
       }
       const containerName = this.containerName;
 
-      // 1. Create container (with image pull if needed)
-      initLogger.logStep(`Creating container from ${this.config.image}...`);
-
-      // Check if container already exists (e.g., from aborted previous attempt)
-      const checkResult = await runDockerCommand(`docker inspect ${containerName}`, 10000);
-      if (checkResult.exitCode === 0) {
-        // Container exists - check if running
-        const isRunning = await runDockerCommand(
-          `docker inspect -f '{{.State.Running}}' ${containerName}`,
-          10000
-        );
-        if (isRunning.exitCode === 0 && isRunning.stdout.trim() === "true") {
-          initLogger.logStderr(`Container ${containerName} already exists and is running`);
-          initLogger.logComplete(-1);
-          return {
-            success: false,
-            error: `Workspace already exists: container ${containerName}`,
-          };
-        }
-        // Stopped/dead container from app crash or unexpected termination - clean up
-        initLogger.logStep("Removing stale container from previous attempt...");
-        await runDockerCommand(`docker rm -f ${containerName}`, 10000);
-      }
-
-      if (abortSignal?.aborted) {
-        initLogger.logComplete(-1);
-        return { success: false, error: "Workspace creation aborted" };
-      }
-
-      // Create and start container with streaming output for image pull progress
-      const runResult = await streamDockerRun(containerName, this.config.image, initLogger, {
-        abortSignal,
-        shareCredentials: this.config.shareCredentials,
-      });
-      if (runResult.exitCode !== 0) {
-        initLogger.logStderr(`Failed to create container: ${runResult.stderr}`);
-        initLogger.logComplete(-1);
-        return {
-          success: false,
-          error: `Failed to create container: ${runResult.stderr}`,
-        };
-      }
-
-      // Create /src directory and /var/mux/plans in container
-      // /var/mux is used instead of ~/.mux because /root has 700 permissions,
-      // which makes it inaccessible to VS Code Dev Containers (non-root user)
-      initLogger.logStep("Preparing workspace directory...");
-      const mkdirResult = await runDockerCommand(
-        `docker exec ${containerName} mkdir -p ${CONTAINER_SRC_DIR} /var/mux/plans`,
-        10000
+      // Check if container already exists (e.g., from successful fork or aborted previous attempt)
+      const containerCheck = await this.checkExistingContainer(
+        containerName,
+        workspacePath,
+        branchName
       );
-      if (mkdirResult.exitCode !== 0) {
-        await runDockerCommand(`docker rm -f ${containerName}`, 10000);
-        initLogger.logStderr(`Failed to create workspace directory: ${mkdirResult.stderr}`);
-        initLogger.logComplete(-1);
-        return {
-          success: false,
-          error: `Failed to create workspace directory: ${mkdirResult.stderr}`,
-        };
+      switch (containerCheck.action) {
+        case "skip":
+          initLogger.logStep("Container already running (from fork), running init hook...");
+          await this.setupCredentials(containerName, env);
+          skipContainerSetup = true;
+          break;
+        case "cleanup":
+          initLogger.logStep(containerCheck.reason);
+          await runDockerCommand(`docker rm -f ${containerName}`, 10000);
+          break;
+        case "create":
+          break;
       }
 
-      initLogger.logStep("Container ready");
-
-      // Copy host gitconfig into container (not mounted, so gh can modify it)
-      if (this.config.shareCredentials) {
-        const gitconfig = path.join(os.homedir(), ".gitconfig");
-        if (existsSync(gitconfig)) {
-          await runDockerCommand(`docker cp ${gitconfig} ${containerName}:/root/.gitconfig`, 10000);
+      if (!skipContainerSetup) {
+        const setupResult = await this.setupContainerAndSyncProject({
+          containerName,
+          projectPath,
+          workspacePath,
+          branchName,
+          trunkBranch,
+          initLogger,
+          abortSignal,
+          env,
+        });
+        if (!setupResult.success) {
+          return setupResult;
         }
       }
-
-      // Configure gh CLI as git credential helper if GH_TOKEN is available
-      // GH_TOKEN can come from project secrets (env) or host environment (buildCredentialArgs)
-      const ghToken = env?.GH_TOKEN ?? process.env.GH_TOKEN;
-      if (this.config.shareCredentials && ghToken) {
-        await runDockerCommand(
-          `docker exec -e GH_TOKEN=${shescape.quote(ghToken)} ${containerName} sh -c 'command -v gh >/dev/null && gh auth setup-git || true'`,
-          10000
-        );
-      }
-
-      // 2. Sync project to container using git bundle + docker cp
-      initLogger.logStep("Syncing project files to container...");
-      try {
-        await this.syncProjectToContainer(
-          projectPath,
-          containerName,
-          workspacePath,
-          initLogger,
-          abortSignal
-        );
-      } catch (error) {
-        const errorMsg = getErrorMessage(error);
-        initLogger.logStderr(`Failed to sync project: ${errorMsg}`);
-        initLogger.logComplete(-1);
-        // Clean up container on failure
-        await runDockerCommand(`docker rm -f ${containerName}`, 10000);
-        return {
-          success: false,
-          error: `Failed to sync project: ${errorMsg}`,
-        };
-      }
-      initLogger.logStep("Files synced successfully");
-
-      // 3. Checkout branch
-      initLogger.logStep(`Checking out branch: ${branchName}`);
-      const checkoutCmd = `git checkout ${shescape.quote(branchName)} 2>/dev/null || git checkout -b ${shescape.quote(branchName)} ${shescape.quote(trunkBranch)}`;
-
-      const checkoutStream = await this.exec(checkoutCmd, {
-        cwd: workspacePath,
-        timeout: 300,
-        abortSignal,
-      });
-
-      const [stdout, stderr, exitCode] = await Promise.all([
-        streamToString(checkoutStream.stdout),
-        streamToString(checkoutStream.stderr),
-        checkoutStream.exitCode,
-      ]);
-
-      if (exitCode !== 0) {
-        const errorMsg = `Failed to checkout branch: ${stderr || stdout}`;
-        initLogger.logStderr(errorMsg);
-        initLogger.logComplete(-1);
-        // Clean up container on failure
-        await runDockerCommand(`docker rm -f ${containerName}`, 10000);
-        return {
-          success: false,
-          error: errorMsg,
-        };
-      }
-      initLogger.logStep("Branch checked out successfully");
 
       // 4. Run .mux/init hook if it exists
       const hookExists = await checkInitHookExists(projectPath);
@@ -579,8 +491,8 @@ export class DockerRuntime extends RemoteRuntime {
       const errorMsg = getErrorMessage(error);
       initLogger.logStderr(`Initialization failed: ${errorMsg}`);
       initLogger.logComplete(-1);
-      // Clean up container on failure
-      if (this.containerName) {
+      // Only clean up container if we created it (preserve forked containers on init hook failure)
+      if (this.containerName && !skipContainerSetup) {
         await runDockerCommand(`docker rm -f ${this.containerName}`, 10000);
       }
       return {
@@ -588,6 +500,184 @@ export class DockerRuntime extends RemoteRuntime {
         error: errorMsg,
       };
     }
+  }
+
+  /**
+   * Check if a container already exists and whether it's valid for reuse.
+   * Returns action to take: skip setup, cleanup invalid container, or create new.
+   */
+  private async checkExistingContainer(
+    containerName: string,
+    workspacePath: string,
+    branchName: string
+  ): Promise<ContainerCheckResult> {
+    const exists = await runDockerCommand(`docker inspect ${containerName}`, 10000);
+    if (exists.exitCode !== 0) return { action: "create" };
+
+    const isRunning = await runDockerCommand(
+      `docker inspect -f '{{.State.Running}}' ${containerName}`,
+      10000
+    );
+    if (isRunning.exitCode !== 0 || isRunning.stdout.trim() !== "true") {
+      return { action: "cleanup", reason: "Removing stale container from previous attempt..." };
+    }
+
+    // Container running - validate it has an initialized git repo
+    const gitCheck = await runDockerCommand(
+      `docker exec ${containerName} test -d ${workspacePath}/.git`,
+      5000
+    );
+    if (gitCheck.exitCode !== 0) {
+      return {
+        action: "cleanup",
+        reason: "Container exists but repo not initialized, recreating...",
+      };
+    }
+
+    // Verify correct branch is checked out
+    // (handles edge case: crash after clone but before checkout left container on wrong branch)
+    const branchCheck = await runDockerCommand(
+      `docker exec ${containerName} git -C ${workspacePath} rev-parse --abbrev-ref HEAD`,
+      5000
+    );
+    if (branchCheck.exitCode !== 0 || branchCheck.stdout.trim() !== branchName) {
+      return { action: "cleanup", reason: "Container exists but wrong branch, recreating..." };
+    }
+
+    return { action: "skip" };
+  }
+
+  /**
+   * Copy gitconfig and configure gh CLI credential helper in container.
+   * Called for both new containers and reused forked containers.
+   */
+  private async setupCredentials(
+    containerName: string,
+    env?: Record<string, string>
+  ): Promise<void> {
+    if (!this.config.shareCredentials) return;
+
+    // Copy host gitconfig into container (not mounted, so gh can modify it)
+    const gitconfig = path.join(os.homedir(), ".gitconfig");
+    if (existsSync(gitconfig)) {
+      await runDockerCommand(`docker cp ${gitconfig} ${containerName}:/root/.gitconfig`, 10000);
+    }
+
+    // Configure gh CLI as git credential helper if GH_TOKEN is available
+    // GH_TOKEN can come from project secrets (env) or host environment (buildCredentialArgs)
+    const ghToken = env?.GH_TOKEN ?? process.env.GH_TOKEN;
+    if (ghToken) {
+      await runDockerCommand(
+        `docker exec -e GH_TOKEN=${shescape.quote(ghToken)} ${containerName} sh -c 'command -v gh >/dev/null && gh auth setup-git || true'`,
+        10000
+      );
+    }
+  }
+
+  /**
+   * Create container, sync project files, and checkout branch.
+   * This is the full setup path for new workspaces (not forked ones).
+   */
+  private async setupContainerAndSyncProject(params: {
+    containerName: string;
+    projectPath: string;
+    workspacePath: string;
+    branchName: string;
+    trunkBranch: string;
+    initLogger: InitLogger;
+    abortSignal?: AbortSignal;
+    env?: Record<string, string>;
+  }): Promise<WorkspaceInitResult> {
+    const {
+      containerName,
+      projectPath,
+      workspacePath,
+      branchName,
+      trunkBranch,
+      initLogger,
+      abortSignal,
+      env,
+    } = params;
+
+    // Helper to log error, mark complete, clean up container, and return failure
+    const failWithCleanup = async (errorMsg: string): Promise<WorkspaceInitResult> => {
+      initLogger.logStderr(errorMsg);
+      initLogger.logComplete(-1);
+      await runDockerCommand(`docker rm -f ${containerName}`, 10000);
+      return { success: false, error: errorMsg };
+    };
+
+    // 1. Create container (with image pull if needed)
+    initLogger.logStep(`Creating container from ${this.config.image}...`);
+
+    if (abortSignal?.aborted) {
+      initLogger.logComplete(-1);
+      return { success: false, error: "Workspace creation aborted" };
+    }
+
+    // Create and start container with streaming output for image pull progress
+    const runResult = await streamDockerRun(containerName, this.config.image, initLogger, {
+      abortSignal,
+      shareCredentials: this.config.shareCredentials,
+    });
+    if (runResult.exitCode !== 0) {
+      return failWithCleanup(`Failed to create container: ${runResult.stderr}`);
+    }
+
+    // Create /src directory and /var/mux/plans in container
+    // /var/mux is used instead of ~/.mux because /root has 700 permissions,
+    // which makes it inaccessible to VS Code Dev Containers (non-root user)
+    initLogger.logStep("Preparing workspace directory...");
+    const mkdirResult = await runDockerCommand(
+      `docker exec ${containerName} mkdir -p ${CONTAINER_SRC_DIR} /var/mux/plans`,
+      10000
+    );
+    if (mkdirResult.exitCode !== 0) {
+      return failWithCleanup(`Failed to create workspace directory: ${mkdirResult.stderr}`);
+    }
+
+    initLogger.logStep("Container ready");
+
+    // Setup credentials (gitconfig + gh auth)
+    await this.setupCredentials(containerName, env);
+
+    // 2. Sync project to container using git bundle + docker cp
+    initLogger.logStep("Syncing project files to container...");
+    try {
+      await this.syncProjectToContainer(
+        projectPath,
+        containerName,
+        workspacePath,
+        initLogger,
+        abortSignal
+      );
+    } catch (error) {
+      return failWithCleanup(`Failed to sync project: ${getErrorMessage(error)}`);
+    }
+    initLogger.logStep("Files synced successfully");
+
+    // 3. Checkout branch
+    initLogger.logStep(`Checking out branch: ${branchName}`);
+    const checkoutCmd = `git checkout ${shescape.quote(branchName)} 2>/dev/null || git checkout -b ${shescape.quote(branchName)} ${shescape.quote(trunkBranch)}`;
+
+    const checkoutStream = await this.exec(checkoutCmd, {
+      cwd: workspacePath,
+      timeout: 300,
+      abortSignal,
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      streamToString(checkoutStream.stdout),
+      streamToString(checkoutStream.stderr),
+      checkoutStream.exitCode,
+    ]);
+
+    if (exitCode !== 0) {
+      return failWithCleanup(`Failed to checkout branch: ${stderr || stdout}`);
+    }
+    initLogger.logStep("Branch checked out successfully");
+
+    return { success: true };
   }
 
   /**

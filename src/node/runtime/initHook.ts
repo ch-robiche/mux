@@ -9,6 +9,7 @@ import {
   type RuntimeConfig,
   type RuntimeMode,
 } from "@/common/types/runtime";
+
 import type { ThinkingLevel } from "@/common/types/thinking";
 
 /**
@@ -220,5 +221,7 @@ export async function runInitHookOnRuntime(
   // Wait for all streams and exit code
   const [exitCode] = await Promise.all([hookStream.exitCode, readStdout(), readStderr()]);
 
+  // Log completion with exit code - hook failures are non-fatal per docs/hooks/init.mdx
+  // ("failures are logged but don't prevent workspace usage")
   initLogger.logComplete(exitCode);
 }
