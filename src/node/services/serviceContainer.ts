@@ -9,6 +9,7 @@ import { PTYService } from "@/node/services/ptyService";
 import type { TerminalWindowManager } from "@/desktop/terminalWindowManager";
 import { ProjectService } from "@/node/services/projectService";
 import { WorkspaceService } from "@/node/services/workspaceService";
+import { MuxGatewayOauthService } from "@/node/services/muxGatewayOauthService";
 import { ProviderService } from "@/node/services/providerService";
 import { ExtensionMetadataService } from "@/node/services/ExtensionMetadataService";
 import { TerminalService } from "@/node/services/terminalService";
@@ -57,6 +58,7 @@ export class ServiceContainer {
   public readonly workspaceService: WorkspaceService;
   public readonly taskService: TaskService;
   public readonly providerService: ProviderService;
+  public readonly muxGatewayOauthService: MuxGatewayOauthService;
   public readonly terminalService: TerminalService;
   public readonly editorService: EditorService;
   public readonly windowService: WindowService;
@@ -133,7 +135,12 @@ export class ServiceContainer {
       this.extensionMetadata,
       (workspaceId) => this.workspaceService.emitIdleCompactionNeeded(workspaceId)
     );
+    this.windowService = new WindowService();
     this.providerService = new ProviderService(config);
+    this.muxGatewayOauthService = new MuxGatewayOauthService(
+      this.providerService,
+      this.windowService
+    );
     // Terminal services - PTYService is cross-platform
     this.ptyService = new PTYService();
     this.terminalService = new TerminalService(config, this.ptyService);
@@ -141,7 +148,6 @@ export class ServiceContainer {
     this.workspaceService.setTerminalService(this.terminalService);
     // Editor service for opening workspaces in code editors
     this.editorService = new EditorService(config);
-    this.windowService = new WindowService();
     this.updateService = new UpdateService();
     this.tokenizerService = new TokenizerService();
     this.serverService = new ServerService();
@@ -226,6 +232,7 @@ export class ServiceContainer {
    */
   async dispose(): Promise<void> {
     this.mcpServerManager.dispose();
+    await this.muxGatewayOauthService.dispose();
     await this.backgroundProcessManager.terminateAll();
   }
 }

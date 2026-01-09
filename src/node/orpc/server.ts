@@ -19,7 +19,7 @@ import { OpenAPIHandler } from "@orpc/openapi/node";
 import { ZodToJsonSchemaConverter } from "@orpc/zod/zod4";
 import { router, type AppRouter } from "@/node/orpc/router";
 import type { ORPCContext } from "@/node/orpc/context";
-import { extractWsHeaders } from "@/node/orpc/authMiddleware";
+import { extractWsHeaders, safeEq } from "@/node/orpc/authMiddleware";
 import { VERSION } from "@/version";
 import { log } from "@/node/services/log";
 
@@ -84,6 +84,11 @@ function formatHostForUrl(host: string): string {
   return trimmed;
 }
 
+function extractBearerToken(header: string | undefined): string | null {
+  if (!header?.toLowerCase().startsWith("bearer ")) return null;
+  const token = header.slice(7).trim();
+  return token.length ? token : null;
+}
 function injectBaseHref(indexHtml: string, baseHref: string): string {
   // Avoid double-injecting if the HTML already has a base tag.
   if (/<base\b/i.test(indexHtml)) {
@@ -92,6 +97,19 @@ function injectBaseHref(indexHtml: string, baseHref: string): string {
 
   // Insert immediately after the opening <head> tag (supports <head> and <head ...attrs>).
   return indexHtml.replace(/<head[^>]*>/i, (match) => `${match}\n    <base href="${baseHref}" />`);
+}
+
+function escapeJsonForHtmlScript(value: unknown): string {
+  // Prevent `</script>` injection when embedding untrusted strings in an inline <script>.
+  return JSON.stringify(value).replaceAll("<", "\\u003c");
+}
+function escapeHtml(input: string): string {
+  return input
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 /**
@@ -150,6 +168,154 @@ export async function createOrpcServer({
   // Version endpoint
   app.get("/version", (_req, res) => {
     res.json({ ...VERSION, mode: "server" });
+  });
+
+  // --- Mux Gateway OAuth (unauthenticated bootstrap routes) ---
+  // These are raw Express routes (not oRPC) because the OAuth provider cannot
+  // send a mux Bearer token during the redirect callback.
+  app.get("/auth/mux-gateway/start", (req, res) => {
+    if (authToken?.trim()) {
+      const expectedToken = authToken.trim();
+      const presentedToken = extractBearerToken(req.header("authorization"));
+      if (!presentedToken || !safeEq(presentedToken, expectedToken)) {
+        res.status(401).json({ error: "Invalid or missing auth token" });
+        return;
+      }
+    }
+
+    const hostHeader = req.get("x-forwarded-host") ?? req.get("host");
+    const host = hostHeader?.split(",")[0]?.trim();
+    if (!host) {
+      res.status(400).json({ error: "Missing Host header" });
+      return;
+    }
+
+    // When mux is running behind a reverse proxy, the terminating proxy may set
+    // X-Forwarded-Proto / X-Forwarded-Host, while the direct connection to mux
+    // is plain HTTP.
+    const protoHeader = req.get("x-forwarded-proto");
+    const forwardedProto = protoHeader?.split(",")[0]?.trim();
+    const proto = forwardedProto?.length ? forwardedProto : req.protocol;
+
+    const redirectUri = `${proto}://${host}/auth/mux-gateway/callback`;
+    const { authorizeUrl, state } = context.muxGatewayOauthService.startServerFlow({ redirectUri });
+    res.json({ authorizeUrl, state });
+  });
+
+  app.get("/auth/mux-gateway/callback", async (req, res) => {
+    const state = typeof req.query.state === "string" ? req.query.state : null;
+    const code = typeof req.query.code === "string" ? req.query.code : null;
+    const error = typeof req.query.error === "string" ? req.query.error : null;
+    const errorDescription =
+      typeof req.query.error_description === "string" ? req.query.error_description : undefined;
+
+    const result = await context.muxGatewayOauthService.handleServerCallbackAndExchange({
+      state,
+      code,
+      error,
+      errorDescription,
+    });
+
+    const payload = {
+      type: "mux-gateway-oauth",
+      state,
+      ok: result.success,
+      error: result.success ? null : result.error,
+    };
+
+    const payloadJson = escapeJsonForHtmlScript(payload);
+
+    const title = result.success ? "Login complete" : "Login failed";
+    const description = result.success
+      ? "You can return to Mux. You may now close this tab."
+      : payload.error
+        ? escapeHtml(payload.error)
+        : "An unknown error occurred.";
+
+    const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0e0e0e" />
+    <title>${title}</title>
+    <link rel="stylesheet" href="https://gateway.mux.coder.com/static/css/site.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="site-header">
+        <div class="container">
+          <div class="header-title">mux</div>
+        </div>
+      </header>
+
+      <main class="site-main">
+        <div class="container">
+          <div class="content-surface">
+            <h1>${title}</h1>
+            <p>${description}</p>
+            ${result.success ? '<p class="muted">This tab should close automatically.</p>' : ""}
+            <p><a class="btn primary" href="/">Return to Mux</a></p>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      (() => {
+        const payload = ${payloadJson};
+        const ok = payload.ok === true;
+
+        try {
+          if (window.opener && typeof window.opener.postMessage === "function") {
+            window.opener.postMessage(payload, "*");
+          }
+        } catch {
+          // Ignore postMessage failures.
+        }
+
+        if (!ok) {
+          return;
+        }
+
+        try {
+          if (window.opener && typeof window.opener.focus === "function") {
+            window.opener.focus();
+          }
+        } catch {
+          // Ignore focus failures.
+        }
+
+        try {
+          window.close();
+        } catch {
+          // Ignore close failures.
+        }
+
+        setTimeout(() => {
+          try {
+            window.close();
+          } catch {
+            // Ignore close failures.
+          }
+        }, 50);
+
+        setTimeout(() => {
+          try {
+            window.location.replace("/");
+          } catch {
+            // Ignore navigation failures.
+          }
+        }, 150);
+      })();
+    </script>
+  </body>
+</html>`;
+
+    res.status(result.success ? 200 : 400);
+    res.setHeader("Content-Type", "text/html");
+    res.send(html);
   });
 
   const orpcRouter = existingRouter ?? router(authToken);
