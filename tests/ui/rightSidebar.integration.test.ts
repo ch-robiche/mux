@@ -737,4 +737,90 @@ describeIntegration("RightSidebar (UI)", () => {
       }
     });
   }, 60_000);
+
+  test("Cmd+T opens terminal and selects its tab", async () => {
+    await withSharedWorkspace("anthropic", async ({ env, workspaceId, metadata }) => {
+      const cleanupDom = installDom();
+
+      // Clear any persisted state
+      localStorage.removeItem(RIGHT_SIDEBAR_TAB_KEY);
+      localStorage.removeItem(getRightSidebarLayoutKey(workspaceId));
+
+      const view = renderApp({
+        apiClient: env.orpc,
+        metadata,
+      });
+
+      try {
+        await setupWorkspaceView(view, metadata, workspaceId);
+
+        // Find the right sidebar
+        const sidebar = await waitFor(
+          () => {
+            const el = view.container.querySelector(
+              '[role="complementary"][aria-label="Workspace insights"]'
+            );
+            if (!el) throw new Error("RightSidebar not found");
+            return el as HTMLElement;
+          },
+          { timeout: 10_000 }
+        );
+
+        // Verify no terminal tab exists initially
+        const initialTerminalTab = sidebar.querySelector(
+          '[role="tab"][aria-controls*="terminal:"]'
+        );
+        expect(initialTerminalTab).toBeNull();
+
+        // Press Ctrl+T (Cmd+T on mac) to open a new terminal
+        fireEvent.keyDown(window, { key: "t", ctrlKey: true });
+
+        // Wait for the terminal tab to appear and become selected
+        const terminalTab = await waitFor(
+          () => {
+            const tab = sidebar.querySelector(
+              '[role="tab"][aria-controls*="terminal:"]'
+            ) as HTMLElement | null;
+            if (!tab) throw new Error("Terminal tab not found after Cmd+T");
+            return tab;
+          },
+          { timeout: 10_000 }
+        );
+
+        await waitFor(() => {
+          expect(terminalTab.getAttribute("aria-selected")).toBe("true");
+        });
+
+        // Verify terminal panel is visible (not hidden)
+        const terminalPanel = await waitFor(
+          () => {
+            const panel = sidebar.querySelector(
+              '[role="tabpanel"][id*="terminal"]:not([hidden])'
+            ) as HTMLElement | null;
+            if (!panel) throw new Error("Terminal panel not visible");
+            return panel;
+          },
+          { timeout: 5_000 }
+        );
+
+        // Verify the terminal view is rendered inside the panel
+        await waitFor(
+          () => {
+            const terminalView = terminalPanel.querySelector(
+              ".terminal-view"
+            ) as HTMLElement | null;
+            if (!terminalView) throw new Error("Terminal view not found");
+          },
+          { timeout: 5_000 }
+        );
+
+        // Note: Actual terminal focus cannot be reliably tested in happy-dom
+        // because ghostty-web uses WebAssembly and complex browser APIs.
+        // The autoFocus behavior is verified by the implementation passing
+        // autoFocus={true} to TerminalView when the terminal is opened via keybind.
+      } finally {
+        await cleanupView(view, cleanupDom);
+      }
+    });
+  }, 60_000);
 });
